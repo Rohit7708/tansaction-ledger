@@ -1,0 +1,78 @@
+// Prisma schema for the account & transaction ledger.
+//
+// Several invariants cannot be expressed in Prisma's schema language and are
+// enforced by hand-written SQL in the migrations (see prisma/migrations):
+//   - accounts.balance >= 0
+//   - accounts.name is not blank
+//   - transactions.amount > 0
+//   - transfers.amount > 0 and from_account_id <> to_account_id
+//   - transactions rows are append-only (UPDATE / DELETE are rejected by a trigger)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+model Account {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(100)
+  balance   Decimal  @default(0) @db.Decimal(19, 2)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  transactions      Transaction[]
+  outgoingTransfers Transfer[]    @relation("TransferFrom")
+  incomingTransfers Transfer[]    @relation("TransferTo")
+
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@map("accounts")
+}
+
+model Transaction {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId   String          @map("account_id") @db.Uuid
+  type        TransactionType
+  amount      Decimal         @db.Decimal(19, 2)
+  description String          @default("") @db.VarChar(255)
+  referenceId String          @map("reference_id") @db.VarChar(120)
+  transferId  String?         @map("transfer_id") @db.Uuid
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  transfer Transfer? @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  // Idempotency: a reference may be used only once per account.
+  @@unique([accountId, referenceId])
+  // Supports paginated history: WHERE account_id = ? ORDER BY created_at DESC, id DESC.
+  @@index([accountId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([transferId])
+  @@map("transactions")
+}
+
+model Transfer {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fromAccountId String   @map("from_account_id") @db.Uuid
+  toAccountId   String   @map("to_account_id") @db.Uuid
+  amount        Decimal  @db.Decimal(19, 2)
+  description   String   @default("") @db.VarChar(255)
+  // Idempotency key for the whole transfer; globally unique.
+  referenceId   String   @unique @map("reference_id") @db.VarChar(100)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  fromAccount  Account       @relation("TransferFrom", fields: [fromAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  toAccount    Account       @relation("TransferTo", fields: [toAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  transactions Transaction[]
+
+  @@index([fromAccountId])
+  @@index([toAccountId])
+  @@map("transfers")
+}
